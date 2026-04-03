@@ -20,22 +20,25 @@ BANDIT_PROBABILITIES = [0.2, 0.5, 0.75]
 class Bandit:
   def __init__(self, p):
     self.p = p
-    self.a = 1
-    self.b = 1
+    self.mean = 0.0
+    self.data_sum = 0.0
+    self.precision = 0.0
+    self.tau = 1.0
     self.N = 0 # for information only
 
   def pull(self):
-    return np.random.random() < self.p
+    pass
 
   def sample(self):
-    return np.random.beta(a=self.a, b=self.b)
+    pass
 
   def update(self, x):
-    if x == True:
-      self.a += 1
-    elif x == False:
-      self.b += 1
     self.N += 1
+    self.data_sum += x
+    old_precision = self.precision
+    old_mean = self.mean
+    self.precision = self.tau * self.N + self.precision
+    self.mean = (1 / self.precision) * ((self.tau * self.data_sum) + (old_precision * old_mean))
 
 
 def plot(bandits, trial):
