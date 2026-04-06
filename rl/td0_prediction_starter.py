@@ -1,4 +1,6 @@
 import grid_world
+import numpy as np
+import random
 
 class Agent:
     def __init__(self, world: grid_world.Grid):
@@ -6,8 +8,16 @@ class Agent:
         self.Vs = dict()
         self.Qsa = dict()
         self.policy = dict()
-        self.delta_threshold = 0.001
+        self.epsilon = 0.1
         self.gamma = 0.9
+        self.a = 0.1
+
+    def epsilonGreedy(self, state):
+        random_num = np.random.random()
+        if (random_num < self.epsilon):
+            return random.choice(self.world.actions[state])
+        else:
+            return self.policy[state]
 
     def initValues(self):
         for i in range(self.world.rows):
@@ -46,51 +56,51 @@ class Agent:
                     print(f"{'':^6}", end=" ")
             print()
 
-    def policyEvaluation(self):
-        while True:
-            delta = 0.0
-
-            for s in self.world.all_states():
-                # skip terminal states
-                if s not in self.world.actions:
-                    continue
-
-                old_v = self.Vs[s]
-
-                # deterministic policy: pick only one action
-                a = self.policy[s]
-                print(f"Setting state: {s}")
-                # simulate one step from s using action a
-                self.world.set_state(s)
+    def td0Prediction(self, samples = 2000):
+        # Initialize all V(s) to 0
+        for i in range(self.world.rows):
+            for j in range(self.world.cols):
+                self.Vs[(i, j)] = 0.0
+        
+        for _ in range(samples): 
+            s = self.world.reset()
+            while not self.world.is_terminal(s):
+                #a = self.policy[s]
+                a = self.epsilonGreedy(s)
                 r = self.world.move(a)
                 s_next = self.world.current_state()
+                self.Vs[s] = self.Vs[s] + self.a * (r + self.gamma * self.Vs[s_next] - self.Vs[s])
+                s = s_next
 
-                new_v = r + self.gamma * self.Vs[s_next]
-                self.Vs[s] = new_v
-
-                delta = max(delta, abs(old_v - new_v))
-
-            self.printVs()
-            if delta < self.delta_threshold:
-                break
 
 def main():
     standard_world = grid_world.standard_grid()
     agent = Agent(world=standard_world)
     agent.initValues()
+    
     agent.policy = {
-        (2, 0): 'U',
-        (1, 0): 'U',
         (0, 0): 'R',
         (0, 1): 'R',
         (0, 2): 'R',
-        (1, 2): 'U',
-        (2, 1): 'R',
-        (2, 2): 'U',
-        (2, 3): 'L',
-    }
-    agent.policyEvaluation()
 
+        (1, 0): 'U',
+        (1, 2): 'R',
+
+        (2, 0): 'U',
+        (2, 1): 'R',
+        (2, 2): 'R',
+        (2, 3): 'U',
+    }
+    
+    print("---Before---")
+    agent.printVs()
+    agent.printPolicy()
+
+    agent.td0Prediction()
+
+    print("---After---")
+    agent.printVs()
+    agent.printPolicy()
 
 if __name__ == "__main__":
     main()
