@@ -5,14 +5,16 @@ from builtins import range
 # Note: you may need to update your version of future
 # sudo pip install -U future
 
-import gym
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.kernel_approximation import RBFSampler
+import gymnasium as gym
 
 
 GAMMA = 0.99
 ALPHA = 0.1
+N_EPISODES = 1500
+VISUALIZE_EVERY = 1
 
 
 def epsilon_greedy(model, s, eps=0.1):
@@ -82,6 +84,34 @@ def test_agent(model, env, n_episodes=20):
   return np.mean(reward_per_episode)
 
 
+def train_episode(model, env, eps=0.1):
+  s, info = env.reset()
+  episode_reward = 0
+  done = False
+  truncated = False
+
+  while not (done or truncated):
+    a = epsilon_greedy(model, s, eps=eps)
+    s2, r, done, truncated, info = env.step(a)
+
+    # get the target
+    if done:
+      target = r
+    else:
+      values = model.predict_all_actions(s2)
+      target = r + GAMMA * np.max(values)
+
+    # update the model
+    g = model.grad(s, a)
+    err = target - model.predict(s, a)
+    model.w += ALPHA * err * g
+
+    episode_reward += r
+    s = s2
+
+  return episode_reward
+
+
 def watch_agent(model, env, eps):
   done = False
   truncated = False
@@ -95,56 +125,32 @@ def watch_agent(model, env, eps):
 
 
 if __name__ == '__main__':
-  # instantiate environment
-  env = gym.make("CartPole-v1", render_mode="rgb_array")
+  train_env = gym.make("CartPole-v1")
 
-  model = Model(env)
+  model = Model(train_env)
   reward_per_episode = []
 
-  # watch untrained agent
-  watch_agent(model, env, eps=0)
+  render_env = gym.make("CartPole-v1", render_mode="human")
 
   # repeat until convergence
-  n_episodes = 1500
-  for it in range(n_episodes):
-    s, info = env.reset()
-    episode_reward = 0
-    done = False
-    truncated = False
-    while not (done or truncated):
-      a = epsilon_greedy(model, s)
-      s2, r, done, truncated, info = env.step(a)
+  for it in range(N_EPISODES):
+    episode_reward = train_episode(model, train_env)
+    reward_per_episode.append(episode_reward)
 
-      # get the target
-      if done:
-        target = r
-      else:
-        values = model.predict_all_actions(s2)
-        target = r + GAMMA * np.max(values)
-
-      # update the model
-      g = model.grad(s, a)
-      err = target - model.predict(s, a)
-      model.w += ALPHA * err * g
-      
-      # accumulate reward
-      episode_reward += r
-
-      # update state
-      s = s2
-
-    if (it + 1) % 50 == 0:
+    if (it + 1) % 1 == 0:
       print(f"Episode: {it + 1}, Reward: {episode_reward}")
+
+    if (it + 1) % VISUALIZE_EVERY == 0:
+      print(f"Visualizing policy after episode {it + 1}")
+      watch_agent(model, render_env, eps=0)
 
     # early exit
     if it > 20 and np.mean(reward_per_episode[-20:]) == 200:
       print("Early exit")
       break
-    
-    reward_per_episode.append(episode_reward)
 
   # test trained agent
-  test_reward = test_agent(model, env)
+  test_reward = test_agent(model, train_env)
   print(f"Average test reward: {test_reward}")
 
   plt.plot(reward_per_episode)
@@ -152,6 +158,7 @@ if __name__ == '__main__':
   plt.show()
 
   # watch trained agent
-  env = gym.make("CartPole-v1", render_mode="human")
-  watch_agent(model, env, eps=0)
+  watch_agent(model, render_env, eps=0)
 
+  train_env.close()
+  render_env.close()
