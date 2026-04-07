@@ -7,9 +7,9 @@ from builtins import range
 
 
 import numpy as np
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 from grid_world import standard_grid, negative_grid
-from iterative_policy_evaluation import print_values, print_policy
+from iterative_policy_evaluation_deterministic import print_values, print_policy
 from sklearn.kernel_approximation import Nystroem, RBFSampler
 
 GAMMA = 0.9
@@ -124,9 +124,9 @@ if __name__ == '__main__':
     mse = episode_err / n_steps
     mse_per_episode.append(mse)
 
-  plt.plot(mse_per_episode)
-  plt.title("MSE per episode")
-  plt.show()
+  # plt.plot(mse_per_episode)
+  # plt.title("MSE per episode")
+  # plt.show()
 
   # obtain predicted values
   V = {}

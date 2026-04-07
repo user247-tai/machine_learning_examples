@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from grid_world import standard_grid, negative_grid
-from iterative_policy_evaluation import print_values, print_policy
+from iterative_policy_evaluation_deterministic import print_values, print_policy
 from sklearn.kernel_approximation import Nystroem, RBFSampler
 
 GAMMA = 0.9
