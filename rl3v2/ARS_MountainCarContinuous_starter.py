@@ -5,40 +5,35 @@ import gymnasium as gym
 
 def get_return_from_env_worker(args):
     """
-    Worker function to evaluate a single member of the population (an 'offspring').
-    Each worker runs a full episode in its own environment instance.
+    Worker function to evaluate a single set of parameters (one rollout).
+    Standardizes observations using running mean/std provided by the main process.
     """
-    # Unpack arguments including global mean and std for consistent observation scaling
     params, input_size, deep_size, action_size, env_name, mean, std = args
 
-    # Initialize environment and neural network for this specific rollout
     env = gym.make(env_name)
     net = ANN(input_size, deep_size, action_size)
     net.update_params(params)
     
-    # Retrieve action limits once to avoid repeated overhead
     action_low = env.action_space.low.astype(np.float32)
     action_high = env.action_space.high.astype(np.float32)
 
     obs, _ = env.reset()
     done = False
     total_reward = 0.0
-    
-    # Collect observations to update the global scaler in the main process
     worker_observations = [obs.copy()]
-
+    
     while not done:
-        # Standardize observation using global statistics from the main process
+        # Standardize observation: (x - mean) / std
         normalized_obs = (obs - mean) / std
         
-        # Forward pass and rescale output to environment's action range
+        # Policy forward pass
         raw_action = net.forward(normalized_obs)
         action = action_low + (raw_action + 1.0) * 0.5 * (action_high - action_low)
         obs, reward, terminated, truncated, _ = env.step(action)
         
         total_reward += reward
         worker_observations.append(obs.copy())
-        
+
         done = terminated or truncated
 
     env.close()
@@ -46,17 +41,16 @@ def get_return_from_env_worker(args):
 
 class OnlineStandardScaler():
     """
-    Tracks running mean and standard deviation of observations 
-    to ensure input features are on a similar scale (Mean 0, Var 1).
+    Welford's Online Algorithm to track running mean and standard deviation.
+    Ensures input features are normalized to Mean 0 and Variance 1.
     """
     def __init__(self, num_inputs):
         self.n = 0
         self.mean = np.zeros(num_inputs)
-        self.ssd = np.zeros(num_inputs) # Sum of Squared Deviations
+        self.ssd = np.zeros(num_inputs) 
         self.std = np.ones(num_inputs)
 
     def partial_fit(self, data_list):
-        """Updates internal statistics using a batch of observations."""
         for X in data_list:
             self.n += 1
             delta = X - self.mean
@@ -65,41 +59,27 @@ class OnlineStandardScaler():
             self.ssd += delta * delta2
         
         if self.n > 1:
-            # Clip variance to prevent division by zero or extreme scaling
+            # Clip variance to prevent division by zero or extreme feature scaling
             variance = (self.ssd / self.n).clip(min=1e-2)
             self.std = np.sqrt(variance)
 
-class AdamOptimizer():
+class Optimizer():
     """
-    Standard Adam Optimizer implemented for flat parameter vectors.
-    Computes adaptive learning rates for each parameter.
+    Basic SGD Optimizer. ARS often performs better with simple SGD 
+    due to internal reward standardization (sigma_R).
     """
-    def __init__(self, params, lr, beta1=0.9, beta2=0.999, eps=1e-8):
+    def __init__(self, params, lr):
         self.lr = lr
-        self.m = np.zeros_like(params) # First moment (momentum)
-        self.v = np.zeros_like(params) # Second moment (RMSprop)
-        self.b1 = beta1
-        self.b2 = beta2
-        self.eps = eps
-        self.t = 1
         self.params = params
 
-    def update(self, g):
-        """Applies gradient update using Adam logic."""
-        self.m = self.b1 * self.m + (1 - self.b1) * g
-        self.v = self.b2 * self.v + (1 - self.b2) * g**2
-        
-        # Bias correction
-        m_hat = self.m / (1 - self.b1**self.t)
-        v_hat = self.v / (1 - self.b2**self.t)
-        
-        self.t += 1
-        self.params += self.lr * m_hat / (np.sqrt(v_hat) + self.eps)
+    def update(self, gradient):
+        self.params += self.lr * gradient
         return self.params
 
 class ANN():
     """
-    Simple MLP Policy: Input -> ReLU(Linear) -> Tanh(Linear) -> Output.
+    Multi-Layer Perceptron (MLP) Policy.
+    Structure: Input -> ReLU -> Hidden -> Tanh -> Output.
     """
     def __init__(self, input_shape, deep_shape, output_shape):
         self.input_shape = input_shape
@@ -108,14 +88,14 @@ class ANN():
         self.init_weights()
 
     def init_weights(self):
-        """Xavier (Glorot) Initialization to keep signal variance stable."""
+        # Xavier/Glorot Initialization
         self.w1 = np.random.randn(self.input_shape, self.deep_shape) / np.sqrt(self.input_shape)
         self.b1 = np.zeros(self.deep_shape)
         self.w2 = np.random.randn(self.deep_shape, self.output_shape) / np.sqrt(self.deep_shape)
         self.b2 = np.zeros(self.output_shape)
 
     def relu(self, x):
-        return x * (x > 0)
+        return np.maximum(0, x)
 
     def forward(self, x):
         x = self.relu((x @ self.w1) + self.b1) 
@@ -123,37 +103,33 @@ class ANN():
         return x
 
     def update_params(self, params):
-        """Unflattens a 1D parameter vector back into matrix weights/biases."""
         idx = 0
         w1_size = self.input_shape * self.deep_shape
         self.w1 = params[idx : idx + w1_size].reshape(self.input_shape, self.deep_shape)
         idx += w1_size
-        
         self.b1 = params[idx : idx + self.deep_shape]
         idx += self.deep_shape
-        
         w2_size = self.deep_shape * self.output_shape
         self.w2 = params[idx : idx + w2_size].reshape(self.deep_shape, self.output_shape)
         idx += w2_size
-        
         self.b2 = params[idx:]
 
     def get_params(self):
-        """Flattens all weights and biases into a single 1D array."""
         return np.concatenate([self.w1.flatten(), self.b1, self.w2.flatten(), self.b2])
 
-class ESAgent():
+class ARSAgent():
     """
-    Evolution Strategies Agent using Parallel Rollouts and Adam optimization.
+    Augmented Random Search (ARS) Agent.
+    Implements Mirror Sampling (positive/negative noise) and Elite Selection.
     """
-    def __init__(self):
-        self.env_name = "HalfCheetah-v5"
-        self.population_size = 30
-        self.sigma = 0.05       # Noise standard deviation (exploration radius)
-        self.learning_rate = 0.01 
-        self.pool_size = multiprocessing.cpu_count() # Utilize all available CPU cores
+    def __init__(self, env_name="MountainCarContinuous-v0"):
+        self.env_name = env_name
+        self.n_directions = 50   # Number of noise vectors (N)
+        self.b = 25              # Number of top performing directions to keep (Elites)
+        self.sigma = 0.1        # Noise standard deviation (exploration radius)
+        self.lr = 0.02           # Learning rate
+        self.pool_size = multiprocessing.cpu_count()
 
-        # Briefly initialize env to determine observation and action space sizes
         temp_env = gym.make(self.env_name)
         self.obs_size = temp_env.observation_space.shape[0]
         self.act_size = temp_env.action_space.shape[0]
@@ -166,48 +142,58 @@ class ESAgent():
     def train(self, iterations=1000):
         params = self.net.get_params()
         num_params = len(params)
-        optimizer = AdamOptimizer(params, self.learning_rate)
+        optimizer = Optimizer(params, self.lr)
 
         for t in range(iterations):
-            # Generate random perturbations (noise)
-            eps = np.random.randn(self.population_size, num_params)
+            # Generate N random directions
+            eps = np.random.randn(self.n_directions, num_params)
 
-            # Construct arguments for each worker in the population
-            args = [
-                (params + self.sigma * eps[i],
-                self.obs_size, 128, self.act_size, self.env_name,
-                self.scaler.mean, self.scaler.std)
-                for i in range(self.population_size)
+            # Create mirror samples: theta + sigma*eps AND theta - sigma*eps
+            # Total 2 * n_directions rollouts
+            eval_params = []
+            for i in range(self.n_directions):
+                eval_params.append(params + self.sigma * eps[i])
+                eval_params.append(params - self.sigma * eps[i])
+
+            # Prepare arguments for parallel workers
+            worker_args = [
+                (p, self.obs_size, 128, self.act_size, self.env_name, self.scaler.mean, self.scaler.std)
+                for p in eval_params
             ]
             
-            # Perform parallel rollouts
-            results = self.pool.map(get_return_from_env_worker, args)
+            results = self.pool.map(get_return_from_env_worker, worker_args)
             
-            # Separate rewards and new observations collected by workers
+            # Extract rewards and update observation scaler
             rewards = np.array([r[0] for r in results])
             all_obs = [obs for r in results for obs in r[1]]
-            
-            # Update global scaler with observations from this generation
             self.scaler.partial_fit(all_obs)
 
-            raw_mean = rewards.mean()
-            raw_std = rewards.std()
+            # Pair rewards for Mirror Sampling comparison
+            reward_pairs = []
+            for i in range(self.n_directions):
+                r_pos = rewards[2*i]
+                r_neg = rewards[2*i + 1]
+                reward_pairs.append((r_pos, r_neg, i))
 
-            if raw_std == 0:
-                print(f"Iter {t}: Zero variance in rewards, skipping...")
-                continue
+            # Elite Selection: Sort directions by the maximum reward of either mirrored version
+            reward_pairs.sort(key=lambda x: max(x[0], x[1]), reverse=True)
+            elites = reward_pairs[: self.b]
 
-            # Reward normalization (Rank-based or Z-score) for stable gradient estimation
-            normalized_rewards = (rewards - raw_mean) / raw_std
+            # Calculate Gradient using only the Elite directions
+            # Standardizing by reward volatility (sigma_R) ensures stable updates
+            all_elite_rewards = [r for pair in elites for r in (pair[0], pair[1])]
+            sigma_R = np.std(all_elite_rewards) + 1e-8
             
-            # Estimate Gradient: g = (1 / n*sigma) * sum(Reward_i * Noise_i)
-            gradient = eps.T @ normalized_rewards / (self.population_size * self.sigma)
-            params = optimizer.update(gradient)
+            grad = np.zeros(num_params)
+            for r_pos, r_neg, idx in elites:
+                grad += (r_pos - r_neg) * eps[idx]
+            
+            grad /= (self.b * sigma_R)
+            params = optimizer.update(grad)
 
-            # Log actual performance metrics
-            print(f"Iter: {t} | Avg Reward: {raw_mean:.2f} | Max: {rewards.max():.2f} | Std: {raw_std:.2f}")
+            if t % 5 == 0:
+                print(f"Iter: {t} | Max Reward: {np.max(rewards):.1f} | Avg: {np.mean(rewards):.1f} | Sigma_R: {sigma_R:.3f}")
 
-        
         self.net.update_params(params)
         return params
     
@@ -270,16 +256,16 @@ class ESAgent():
         self.pool.join()
 
 def main():
-    agent = ESAgent()
+    agent = ARSAgent()
 
     # train
     print("Starting training...")
-    agent.train(iterations=300) 
-    agent.save_model("cheetah.npz")
+    agent.train(iterations=100) 
+    agent.save_model("car2.npz")
 
     # Load and test
     try:
-        agent.load_model("cheetah.npz")
+        agent.load_model("car2.npz")
         print("Testing the loaded model...")
         agent.test(episodes=3, render=True)
     except FileNotFoundError:
